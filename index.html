@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>face-Lit Cam | v1.1</title>
+    <!-- 引入 Tailwind CSS 方便快速排版 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000; /* 將背景改回黑色 #000 */
+        }
+    </style>
+</head>
+<body>
+    <!-- 隱藏的影片元素，用來接收 Webcam 串流 -->
+    <video id="video" autoplay playsinline muted class="hidden"></video>
+
+    <!-- 歷史畫布：用來累積畫上縫隙掃描的殘影 -->
+    <canvas id="historyCanvas" class="absolute inset-0 z-10 w-full h-full"></canvas>
+
+    <!-- 初始畫面覆蓋層：顯示 slit.png，點擊後啟動相機 -->
+    <div id="startOverlay" class="absolute inset-0 z-30 flex items-center justify-center bg-black cursor-pointer transition-opacity duration-700 hover:opacity-90">
+        <img src="slit.png" class="max-w-[80%] max-h-[80%] object-contain drop-shadow-xl">
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const historyCanvas = document.getElementById('historyCanvas');
+        const startOverlay = document.getElementById('startOverlay');
+
+        const ctxHistory = historyCanvas.getContext('2d');
+
+        // 核心設定參數
+        const CYCLE_TIME = 10000; // 掃描一個週期所需的時間（毫秒）
+        let isPlaying = false;
+        let startTime = 0;
+        let lastAngle = 0;
+        
+        // 螢幕與幾何參數
+        let width, height, cx, cy, radius;
+
+        // 處理視窗縮放
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            cx = width / 2;
+            cy = height / 2;
+            
+            // 半徑需涵蓋到螢幕四個角落，故使用畢氏定理求對角線長度
+            radius = Math.sqrt(cx * cx + cy * cy); 
+            
+            historyCanvas.width = width;
+            historyCanvas.height = height;
+        }
+        window.addEventListener('resize', resize);
+        resize(); // 初始設定尺寸
+
+        // 啟動 Webcam
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "user" }, // 強制使用前置自拍鏡頭
+                    audio: false 
+                });
+                video.srcObject = stream;
+                
+                // 等待影片載入中介資料（知道長寬後）再開始
+                video.onloadedmetadata = () => {
+                    video.play();
+                    startOverlay.style.opacity = '0';
+                    setTimeout(() => startOverlay.remove(), 700); // 移除 UI
+                    
+                    // 填滿初始畫面（第一幀截圖），避免一開始全黑
+                    drawInitialSnapshot();
+                    
+                    startTime = performance.now();
+                    isPlaying = true;
+                    requestAnimationFrame(drawLoop);
+                };
+            } catch (err) {
+                alert("無法存取相機，請確認瀏覽器權限設定。");
+                console.error(err);
+            }
+        }
+
+        // 繪製初始全畫面快照
+        function drawInitialSnapshot() {
+            ctxHistory.save();
+            ctxHistory.translate(cx, cy);
+            
+            // 計算 Object-Fit: Cover 的繪製尺寸
+            const vRatio = video.videoWidth / video.videoHeight;
+            const cRatio = width / height;
+            let drawW = vRatio > cRatio ? height * vRatio : width;
+            let drawH = vRatio > cRatio ? height : width / vRatio;
+
+            // 鏡像反轉（像照鏡子）
+            ctxHistory.scale(-1, 1);
+            ctxHistory.drawImage(video, -drawW / 2, -drawH / 2, drawW, drawH);
+            ctxHistory.restore();
+        }
+
+        // 主要的渲染迴圈
+        function drawLoop(time) {
+            if (!isPlaying) return;
+            requestAnimationFrame(drawLoop);
+
+            // 計算當下時間對應的角度 (0 ~ 2π)
+            let elapsed = time - startTime;
+            let currentAngle = (elapsed / CYCLE_TIME) * Math.PI * 2;
+
+            // --- 步驟 1：擷取視訊畫面並拼貼到歷史畫布 (Slit-Scan 核心) ---
+            ctxHistory.save();
+            ctxHistory.translate(cx, cy);
+
+            // 建立一個夾角的遮罩 (Clip)
+            ctxHistory.beginPath();
+            ctxHistory.moveTo(0, 0);
+            
+            // 加入微小的 overlap (0.05) 以防止多次繪製之間產生抗鋸齒的 1px 接縫
+            const overlap = 0.05; 
+            // 減去 Math.PI/2 是為了讓 0 度從時鐘的 12 點鐘方向開始（預設是 3 點鐘方向）
+            ctxHistory.arc(0, 0, radius, lastAngle - Math.PI/2 - overlap, currentAngle - Math.PI/2);
+            ctxHistory.closePath();
+            ctxHistory.clip();
+
+            // 在這個遮罩內畫上當下的鏡頭畫面
+            const vRatio = video.videoWidth / video.videoHeight;
+            const cRatio = width / height;
+            let drawW = vRatio > cRatio ? height * vRatio : width;
+            let drawH = vRatio > cRatio ? height : width / vRatio;
+
+            ctxHistory.scale(-1, 1); // 鏡像反轉
+            ctxHistory.drawImage(video, -drawW / 2, -drawH / 2, drawW, drawH);
+            ctxHistory.restore();
+
+            // 更新上一次的角度
+            lastAngle = currentAngle;
+        }
+
+        // 點擊圖片或全螢幕任一處來啟動相機
+        startOverlay.addEventListener('click', initCamera);
+
+    </script>
+</body>
+</html>
